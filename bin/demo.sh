@@ -13,6 +13,18 @@ STARTED_PID=""
 TMP="$(mktemp -d)"
 trap 'if [ -n "$STARTED_PID" ]; then kill "$STARTED_PID" 2>/dev/null || true; fi; rm -rf "$TMP"' EXIT
 
+# The jar is built for Java 25. Prefer $JAVA_HOME, then a `java` on PATH that is 25+, then an sdkman JDK 25.
+pick_java() {
+  local candidate
+  for candidate in "${JAVA_HOME:+$JAVA_HOME/bin/java}" "$(command -v java || true)" "$HOME"/.sdkman/candidates/java/25*/bin/java; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    local major
+    major=$("$candidate" -version 2>&1 | sed -nE 's/.*version "([0-9]+).*/\1/p' | head -1)
+    if [ "${major:-0}" -ge 25 ]; then echo "$candidate"; return 0; fi
+  done
+  return 1
+}
+
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n'; bold "── $*"; }
 say()  { printf '   %s\n' "$*"; }
@@ -25,7 +37,7 @@ call() {
   say "$label"
   say "\$ curl -X $method ${authflag:+$authflag }$URL$path $*"
   # shellcheck disable=SC2086
-  STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' $authflag -X "$method" "$URL$path" "$@")
+  STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' $authflag -X "$method" "$URL$path" "$@" || echo 000)
   BODY=$(cat "$TMP/body")
   say "→ HTTP $STATUS"
   if [ "$QUIET" != "--quiet" ] && [ -n "$BODY" ]; then
@@ -40,10 +52,14 @@ if ! curl -sf "$URL/actuator/health" >/dev/null 2>&1; then
   if [ ! -f "$JAR" ]; then
     say "nothing answers at $URL and $JAR is not built; run: ./mvnw -q -pl service -DskipTests package"; exit 1
   fi
-  say "nothing answers at $URL; starting $JAR"
-  (cd "$ROOT/service" && exec java -jar "$JAR" > "$TMP/service.log" 2>&1) &
+  JAVA="$(pick_java)" || { say "the service needs Java 25; set JAVA_HOME to a JDK 25 (found: $(java -version 2>&1 | head -1))"; exit 1; }
+  say "nothing answers at $URL; starting $JAR with $JAVA"
+  (cd "$ROOT/service" && exec "$JAVA" -jar "$JAR" > "$TMP/service.log" 2>&1) &
   STARTED_PID=$!
   for _ in $(seq 1 60); do curl -sf "$URL/actuator/health" >/dev/null 2>&1 && break; sleep 1; done
+  if ! curl -sf "$URL/actuator/health" >/dev/null 2>&1; then
+    say "the service did not come up; last lines of its log:"; tail -20 "$TMP/service.log" | sed 's/^/     /'; exit 1
+  fi
 fi
 call "Health is public." - GET /actuator/health
 call "Everything under /api needs HTTP Basic; errors are RFC 9457 problem details." - GET /api/me

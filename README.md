@@ -4,6 +4,8 @@ A REST back end for notes that small teams capture, share and work on together. 
 
 ## Quick start
 
+Needs a JDK 25 on `PATH` or in `JAVA_HOME` (`sdk use java 25.0.4-tem` with sdkman). The Maven wrapper fetches Maven itself.
+
 ```bash
 ./mvnw -q -pl service -DskipTests package
 java -jar service/target/team-notes-service.jar
