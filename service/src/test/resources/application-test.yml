@@ -1,0 +1,9 @@
+notes:
+  security:
+    bcrypt-strength: 4
+  seed:
+    enabled: false
+  attachments:
+    dir: ${java.io.tmpdir}/team-notes-test/attachments
+  sse:
+    heartbeat: 1s

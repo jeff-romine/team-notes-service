@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Build and test
+        run: ./mvnw -B -ntp verify
+      - name: Boot the service and exercise the API
+        run: |
+          (cd service && java -jar target/team-notes-service.jar > /tmp/service.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf localhost:8080/actuator/health > /dev/null && break; sleep 1; done
+          curl -sf -u alice:alice-pw localhost:8080/api/me
+          curl -sf -u carol:carol-pw 'localhost:8080/api/search?q=onboarding' | grep -q '"total":1'
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/*'

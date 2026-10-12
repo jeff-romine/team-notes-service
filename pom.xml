@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>io.github.jeffromine</groupId>
+  <artifactId>team-notes</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>team-notes</name>
+  <description>A note-taking service shared among small teams: REST service plus a CLI for people and agents</description>
+
+  <modules>
+    <module>service</module>
+  </modules>
+
+  <properties>
+    <java.version>25</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <lucene.version>10.5.2</lucene.version>
+    <picocli.version>4.7.7</picocli.version>
+    <springdoc.version>3.1.1</springdoc.version>
+    <pdfbox.version>3.0.8</pdfbox.version>
+    <commonmark.version>0.30.1</commonmark.version>
+    <archunit.version>1.5.1</archunit.version>
+  </properties>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <!-- Mockito 5 must be attached as a Java agent on JDK 21+; this exposes its path as ${org.mockito:mockito-core:jar}. -->
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <executions>
+            <execution>
+              <goals>
+                <goal>properties</goal>
+              </goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <configuration>
+            <argLine>-javaagent:${org.mockito:mockito-core:jar} -Xshare:off</argLine>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>
