@@ -27,6 +27,8 @@ curl -N -u bob:bob-pw localhost:8080/api/notes/<id>/events                      
 
 Every error is an RFC 9457 `application/problem+json` document with a stable `type` such as `urn:notes:problem:version-conflict`.
 
+**Guided demo.** `bin/demo.sh` walks the whole API in thirteen narrated steps (visibility, the whiteboard and its per-entry versions, 403 vs 409, attachments and search inside a PDF, the live event stream, rendered HTML, archive, team roles, validation, paging, reindex, delete), printing each request, status and response. It starts the built jar if nothing answers on `NOTES_URL` (default `http://localhost:8080`) and stops it afterwards; `bin/demo.sh --quiet` prints statuses only. It needs `curl` and `python3`.
+
 ## What it does
 
 - **Notes** have a title, a body in plain text or Markdown, tags, and a visibility: `PRIVATE` (owner only), `TEAM` (members of one team) or `ORGANIZATION` (every signed-in user). Owners edit, archive and delete; `GET /api/notes/{id}/html` renders the note and its entries to HTML with raw HTML escaped.
@@ -63,16 +65,20 @@ Not-visible and nonexistent notes both answer 404, so the API never reveals that
 
 ```mermaid
 flowchart LR
-  subgraph shell["Imperative shell (application, adapters)"]
-    P["prepare<br/>load NoteState"] --> A
-    A --> R{Rejected?}
-    R -- yes --> X["throw RejectionException<br/>nothing written"]
-    R -- no --> W["persist each event<br/>(store re-checks the version)"]
-    W --> E["effects: search projection,<br/>live stream (failures logged, never fail the request)"]
+  subgraph shell["Imperative shell (application + adapters)"]
+    direction LR
+    P["prepare: load the note's state"]
+    X["RejectionException: nothing written, nothing projected"]
+    W["persist each event (the store re-checks the version)"]
+    E["effects: search projection, live stream (logged, never fail the request)"]
   end
   subgraph core["Functional core (domain.core, pure)"]
-    A["apply = guard → decide → evolve"]
+    direction LR
+    G["guard"] --> D["decide"] --> V["evolve"]
   end
+  P --> G
+  G -- "rejected" --> X
+  V -- "accepted: events + new state" --> W --> E
 ```
 
 The pattern follows the deciders in my Temporal commerce platform (nightheron-mono) without their state machines: notes have no lifecycle beyond archived, so a decider per aggregate is enough.
