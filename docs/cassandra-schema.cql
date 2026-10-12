@@ -1,4 +1,4 @@
--- Cassandra data model for team-notes-service (design artifact; the Cassandra adapter is on the roadmap, see README).
+-- Cassandra data model for team-notes-service (design artifact; the Cassandra adapter is the first item under "If I had more time" in the README).
 -- Query-first: one table per access pattern, full copies in the lookup tables, no joins, no secondary indexes.
 
 CREATE KEYSPACE IF NOT EXISTS notes WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};

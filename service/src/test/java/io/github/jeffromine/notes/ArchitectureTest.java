@@ -15,8 +15,8 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
 /**
- * The structural rules that keep the core pure and the shell honest. This is the Java counterpart of the lint
- * selectors nightheron-mono uses for its deciders: no clock, no randomness, no I/O libraries in the core.
+ * The structural rules that keep the core pure and the shell honest: no clock, no randomness, no I/O libraries
+ * in the core, and no adapter reaching into another.
  */
 class ArchitectureTest {
 

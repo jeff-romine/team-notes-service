@@ -13,18 +13,26 @@ java -jar service/target/team-notes-service.jar
 
 The service listens on `http://localhost:8080` and seeds three users and two teams on first start: `alice` (`alice-pw`, admin of team `platform`, also the service admin), `bob` (`bob-pw`, member of `platform`, admin of `data`) and `carol` (`carol-pw`, member of `data`), plus three sample notes. Swagger UI is at `http://localhost:8080/swagger-ui.html`, the OpenAPI document at `/v3/api-docs`, health at `/actuator/health`.
 
-A first walk (every call uses HTTP Basic):
+A first walk (every call uses HTTP Basic; paste the block into a bash or zsh shell while the service is running):
 
 ```bash
 curl -u alice:alice-pw localhost:8080/api/me
-TEAM=$(curl -s -u alice:alice-pw localhost:8080/api/me | python3 -c 'import sys,json;print(json.load(sys.stdin)["teams"][0]["id"])')
-curl -u alice:alice-pw -H 'Content-Type: application/json' -d "{\"title\":\"Heron sightings\",\"body\":\"# Log\\n\\nTwo herons at the *pond*.\",\"bodyFormat\":\"MARKDOWN\",\"tags\":[\"birds\"],\"visibility\":\"TEAM\",\"teamId\":\"$TEAM\"}" localhost:8080/api/notes
-# bob (a platform member) appends an entry to the whiteboard; carol (not a member) gets 404; alice makes it ORGANIZATION-wide; carol finds it
-curl -u bob:bob-pw -H 'Content-Type: application/json' -d '{"body":"saw a **third** one","bodyFormat":"MARKDOWN"}' localhost:8080/api/notes/<id>/entries
-curl -u alice:alice-pw -X PUT -H 'Content-Type: application/json' -d '{"title":"Heron sightings","body":"now org wide","visibility":"ORGANIZATION","tags":["birds"],"version":1}' localhost:8080/api/notes/<id>
+TEAM=$(curl -s -u alice:alice-pw localhost:8080/api/me | python3 -c 'import sys,json; print(json.load(sys.stdin)["teams"][0]["id"])')
+printf '{"title":"Heron sightings","body":"# Log\\n\\nTwo herons at the *pond*.","bodyFormat":"MARKDOWN","tags":["birds"],"visibility":"TEAM","teamId":"%s"}' "$TEAM" > /tmp/note.json
+NOTE=$(curl -s -u alice:alice-pw -H 'Content-Type: application/json' -d @/tmp/note.json localhost:8080/api/notes | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+echo "note $NOTE"
+# bob (a platform member) appends an entry to the whiteboard; carol (not a member) gets 404
+curl -u bob:bob-pw -H 'Content-Type: application/json' -d '{"body":"saw a **third** one","bodyFormat":"MARKDOWN"}' localhost:8080/api/notes/$NOTE/entries
+curl -s -o /dev/null -w 'carol -> HTTP %{http_code}\n' -u carol:carol-pw localhost:8080/api/notes/$NOTE
+# alice makes it ORGANIZATION-wide (version 1 is the version she read); now carol finds it
+curl -u alice:alice-pw -X PUT -H 'Content-Type: application/json' -d '{"title":"Heron sightings","body":"now org wide","visibility":"ORGANIZATION","tags":["birds"],"version":1}' localhost:8080/api/notes/$NOTE
 curl -u carol:carol-pw 'localhost:8080/api/search?q=heron'
-curl -u bob:bob-pw -F 'file=@memo.pdf;type=application/pdf' localhost:8080/api/notes/<id>/attachments   # its text becomes searchable
-curl -N -u bob:bob-pw localhost:8080/api/notes/<id>/events                                              # live stream of changes
+# an attachment's text becomes searchable (PDF, text and Markdown are extracted)
+printf 'kestrel budget memo' > /tmp/memo.txt
+curl -u bob:bob-pw -F 'file=@/tmp/memo.txt;type=text/plain' localhost:8080/api/notes/$NOTE/attachments
+curl -u carol:carol-pw 'localhost:8080/api/search?q=kestrel'
+# the live stream of the note's changes (Ctrl-C to stop)
+curl -N -u bob:bob-pw localhost:8080/api/notes/$NOTE/events
 ```
 
 Every error is an RFC 9457 `application/problem+json` document with a stable `type` such as `urn:notes:problem:version-conflict`.
@@ -40,6 +48,26 @@ Every error is an RFC 9457 `application/problem+json` document with a stable `ty
 - **Teams**: create a team (the creator is its first admin), add and remove members, change roles; the last admin can be neither demoted nor removed.
 - **Optimistic concurrency**: `PUT` carries the `version` it read; a stale version answers 409 with `currentVersion`.
 - **Keyset pagination** on note lists (`cursor`), offset pagination on search (relevance order has no natural keyset).
+
+## Design choices
+
+Two decisions shaped everything else. The sections further down give the detail; this is the reasoning.
+
+### 1. Cassandra as the target store, reached through a port shaped like Cassandra
+
+**What I chose.** The storage interfaces (`application/port`) are designed around Cassandra's query patterns rather than around a generic repository: lists are per partition (one owner's notes, one team's notes), newest first, filtered inside the partition, paged by a keyset cursor of `(createdAt, noteId)`; updates are conditional on the stored version, which is a lightweight transaction in CQL; whiteboard entries are a row per note so concurrent appends never contend; attachment bytes are chunk rows. The default adapter is an in-memory implementation of exactly those semantics, with an optional JSON snapshot, and the Cassandra table design is written down in [docs/cassandra-schema.cql](docs/cassandra-schema.cql).
+
+**Why.** Notes shared among teams are a write-heavy, partition-friendly workload: almost every read is "this owner's notes" or "this team's notes", newest first, which is one Cassandra partition read. Designing the port that way first means the in-memory adapter and a Cassandra adapter behave the same, so the contract tests written now (`AbstractStoreContractTest`) are the acceptance tests for the Cassandra adapter later, and nothing in the domain or the API changes when it lands. It also keeps development honest: there is no second, relational data model that would tempt joins Cassandra cannot do. The detailed alternatives I weighed for the development store (H2, SQLite, MapDB, ScyllaDB in Docker, embedded Cassandra) are in the storage section.
+
+**What it cost.** Some things are harder than in a relational store and the design says so: tag and archived filters scan inside a partition (`ALLOW FILTERING` restricted to one owner or team) rather than using an index; search is a separate projection (Lucene now, Elasticsearch later) because Cassandra does not do relevance; the lookup-table batch is not atomic with the version check, so a crash between them leaves a stale list copy until the next write; the Cassandra adapter itself is not in this cut, so today the service runs on the in-memory adapter only. Even the UUID ordering in the in-memory adapter is Cassandra's unsigned comparison, so that cursors agree byte for byte.
+
+### 2. Functional core, imperative shell, without a state machine
+
+**What I chose.** All business rules live in a pure core (`domain/core`): per command, a `guard` that returns a typed `Rejection` or nothing, a `decide` that is total once guarded and returns past-tense events, and an `evolve` that folds events into state. The shell (`application`) does everything impure in a fixed order: load state, apply the pure decision, persist the events, run the post-commit effects (search projection, live stream). Time and new ids are generated in the shell and placed on the command before it reaches the core; configuration limits enter as a value. An ArchUnit test fails the build if the core reads a clock, generates an id, or depends on Spring or an adapter. I use similar patterns in my personal work, where they are aimed at systems that are clear and understandable to both developers and AI, and focused on scalability, durable execution, reliability and observability; here I left out the explicit state machines those systems use, because a note has no lifecycle beyond archived or not.
+
+**Why.** Correctness is judged on rules like "an outsider gets 404, a member who is not the owner gets 403, a stale version gets 409 with the current version, the last admin cannot be demoted". With a pure core each rule is one small test over values, with no Spring context, no mocks and no database; the whole suite of a hundred tests runs in a few seconds. The same split makes the concurrency story explicit: the core compares versions logically, the store re-checks them atomically, and a race lost in between surfaces as the same 409. It also makes the effects honest: a failing search projection is logged and never turns a committed write into an error response, and the one place that swallows a failure is named as such.
+
+**What it cost.** More types than a service-and-repository layout: sealed commands, events and rejections, a state record per aggregate, and a shell that maps events to repository calls. Some validation is duplicated at the edges (Bean Validation checks presence, the core checks content) so that the core can refuse with a typed rejection instead of an exception. And without a state machine there is no declarative transition table to read; the decider file's one-block-per-command layout is what stands in for it.
 
 ## API
 
@@ -83,9 +111,9 @@ flowchart LR
   V -- "accepted: events + new state" --> W --> E
 ```
 
-The pattern follows the deciders in my Temporal commerce platform (nightheron-mono) without their state machines: notes have no lifecycle beyond archived, so a decider per aggregate is enough.
+I use similar patterns in my personal work, aimed at systems that are clear and understandable to both developers and AI and focused on scalability, durable execution, reliability and observability. This service uses them without state machines: notes have no lifecycle beyond archived, so a decider per aggregate is enough.
 
-- `domain/core` is pure. Every command arrives already enriched by the shell with the request time and any new ids; configuration limits arrive as a value. The core never reads a clock, never generates an id, never does I/O and never throws for control flow. `ArchitectureTest` (ArchUnit) enforces this the way the mono's lint rules do.
+- `domain/core` is pure. Every command arrives already enriched by the shell with the request time and any new ids; configuration limits arrive as a value. The core never reads a clock, never generates an id, never does I/O and never throws for control flow. `ArchitectureTest` (ArchUnit) enforces this at build time.
 - Per command, a **guard** returns the typed `Rejection` (`NotFound`, `Forbidden`, `VersionConflict`, `Invalid`, `LastAdmin`, `Unsupported`, `TooLarge`) or nothing; **decide** is then total and returns past-tense events (an empty list means "nothing to do", as when archiving an archived note); **evolve** is the single writer of state. `NoteDecider.apply` assembles guard, decide and fold into a `Decision`. One block per command, helpers used by one block directly after it, dispatchers last.
 - The shell (`application`) runs prepare, apply, persist, effects. A rejection throws before any write. Version-conditional writes are re-checked by the store (`updateIfVersion`), so a race lost between prepare and persist surfaces as the same 409 the decider would have produced. Effects run after the writes and cannot fail the request; `POST /api/admin/reindex` is the repair path if a projection effect ever fails.
 - Decider tests are plain JUnit over pure functions: one test per guard refusal and decision branch, a parameterised fold over every event type proving `evolve` returns new values and leaves its inputs untouched (the count is asserted against the sealed permits so a new event cannot be forgotten), and replay as a fold.
@@ -145,14 +173,44 @@ Every `notes.*` key in `service/src/main/resources/application.yml` can be set a
 
 Architecture rules (ArchUnit), decider tests over the pure core, shell tests over the in-memory adapters with a fixed clock, contract tests for the store, blob store and search index (shared abstract classes so a Cassandra or Elasticsearch adapter runs the same suite), Markdown, extraction and cursor tests. CI builds on Java 25, runs the suite, boots the jar and exercises the API.
 
-## Roadmap (designed, not yet built)
+## If I had more time
 
-Time-boxed cut: the following were designed for this service and are the next units of work, in order.
+This was a time-boxed cut. What follows is what I would add, change and stop doing next, in that order of priority.
 
-1. **Cassandra adapter** behind the `cassandra` profile over the schema in `docs/cassandra-schema.cql`: hand-written CQL through `CassandraTemplate` (lightweight transactions, logged batches, tuple cursors), docker-compose for development, Testcontainers against `cassandra:5.0` running the existing store and blob contract tests.
-2. **Elasticsearch adapter** behind the `elasticsearch` profile over `ElasticsearchClient` (`multi_match`, `more_like_this`, `refresh=wait_for`), running the existing search contract tests under Testcontainers.
-3. **CLI for people and agents** (`notes`, picocli, no Spring): subcommands mirroring the API, `--json` output, stable exit codes, `notes watch` over the event stream, and a `notes demo` that plays the whole scenario so an agent can learn the API from one run.
-4. **Browser UI** as a separate Next.js project talking directly to this API (the CORS allowlist is already here).
+### Add
+
+1. **The Cassandra adapter** behind a `cassandra` profile, over the schema in `docs/cassandra-schema.cql`: hand-written CQL through the DataStax driver (lightweight transactions for the version checks, logged batches for the lookup tables, tuple comparisons for the cursor), a `compose.yaml` for development, and Testcontainers against `cassandra:5.0` running the existing store and blob contract tests unchanged. The port was shaped for this, so the work is the adapter and its tests, not the domain or the API.
+2. **The Elasticsearch adapter** behind an `elasticsearch` profile over the Elasticsearch Java client (`multi_match`, `more_like_this`, `refresh=wait_for`), running the existing search contract tests under Testcontainers. Lucene stays the development index.
+3. **A CLI for people and agents** (`notes`, picocli, no Spring): subcommands mirroring the API, `--json` output, stable exit codes, `notes watch` over the event stream, and a `notes demo` that plays the scenario `bin/demo.sh` plays today, so an agent can learn the API from one run.
+4. **A browser UI** as a separate Next.js project talking directly to this API; the CORS allowlist is already here.
+5. **A signup endpoint** and a per-user sharing rule (share one note with named people outside its team), both one block each in the deciders.
+6. **Votes and a score** on notes, so cross-team search can sort by what people found useful, completing the Stack Overflow shape.
+
+### Change
+
+- **Replace the synchronous dual write with an outbox or a change feed.** Today the search projection runs in the request after the store write; a crash between the two leaves the index stale until a reindex. With Cassandra in place the natural fix is an outbox table drained by a worker, which also removes the "effects are logged and swallowed" exception from the shell.
+- **Move text extraction out of the upload request.** Extract asynchronously, index when done, and show `textExtracted: false` until then; large PDFs would stop holding a request thread.
+- **Fan the live stream out through a shared bus** (Redis pub/sub or Kafka) so Server-Sent Events work across several instances.
+- **Swap HTTP Basic for OAuth2 or JWT behind a gateway.** The domain never sees the mechanism, so this is one filter chain.
+- **Give tags their own lookup tables** (`notes_by_owner_tag`, `notes_by_team_tag`) once tag filtering is hot enough that an in-partition scan shows up.
+
+### Stop
+
+- **Stop rebuilding the whole search index at startup.** It is right for an in-memory Lucene index and wrong for Elasticsearch over a large store; with the Elasticsearch adapter the startup reindex becomes an explicit admin action only.
+- **Stop writing the whole in-memory state to the JSON snapshot on every mutation.** It is the simplest correct thing for development and it will not scale; once the Cassandra adapter exists the snapshot is a development convenience and should say so, or go.
+- **Stop seeding sample notes and dev passwords by default.** Users and teams seeded from configuration are fine for a demo; a deployed instance should start empty, with `notes.seed.enabled=false` the default and credentials supplied, not shipped.
+- **Stop letting one request do a write and a projection.** This is the same point as the outbox above, seen from the other side: the request should end when the store write is durable.
+
+## Commit history
+
+| Commit | When (MDT) | What |
+|---|---|---|
+| `9cb01d2` | 2026-10-12 13:14 | feat: team-notes-service, a shared note-taking REST back end (Java 25, Spring Boot 4.1) |
+| `139fdd2` | 2026-10-12 13:29 | docs: narrated API demo script and a corrected core/shell diagram |
+| `f6f6ad1` | 2026-10-12 13:31 | fix(demo): pick a JDK 25 to start the service and fail with a message instead of silently |
+| (this commit) | 2026-10-12 | docs: design choices, what I would add/change/stop, a working first walk, commit history |
+
+The first commit is the whole service built in one session under a deadline; the rest are the demo script and documentation. Branch `main` only; every push ran the CI workflow (build, tests, boot the jar and exercise the API) and each run concluded successfully.
 
 ## Layout
 

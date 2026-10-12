@@ -42,7 +42,7 @@ import java.util.UUID;
 /**
  * The functional core for notes, entries and attachments.
  *
- * <p>Shape (after nightheron-mono's deciders, without the state machine): for each command, a {@code guard} that
+ * <p>Shape (a decider without a state machine): for each command, a {@code guard} that
  * owns every refusal derivable from the state and the command, a {@code decide} that is total once guarded and
  * returns the past-tense events (an empty list means "nothing to do"), and {@code evolve} entries that fold each
  * event into the state. {@link #apply} assembles them: guard, decide, fold. Nothing in here reads a clock,
