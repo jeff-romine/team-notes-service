@@ -208,7 +208,8 @@ This was a time-boxed cut. What follows is what I would add, change and stop doi
 | `9cb01d2` | 2026-10-12 13:14 | feat: team-notes-service, a shared note-taking REST back end (Java 25, Spring Boot 4.1) |
 | `139fdd2` | 2026-10-12 13:29 | docs: narrated API demo script and a corrected core/shell diagram |
 | `f6f6ad1` | 2026-10-12 13:31 | fix(demo): pick a JDK 25 to start the service and fail with a message instead of silently |
-| (this commit) | 2026-10-12 | docs: design choices, what I would add/change/stop, a working first walk, commit history |
+| `9741f16` | 2026-10-12 13:52 | docs: design choices, what I would add/change/stop, a working first walk, commit history |
+| (this commit) | 2026-10-12 | docs: appendix with the prompts that produced this project |
 
 The first commit is the whole service built in one session under a deadline; the rest are the demo script and documentation. Branch `main` only; every push ran the CI workflow (build, tests, boot the jar and exercise the API) and each run concluded successfully.
 
@@ -220,3 +221,25 @@ service/                Spring Boot application, tests, application.yml
 docs/cassandra-schema.cql
 .github/workflows/ci.yml
 ```
+
+## Appendix: the prompts that produced this
+
+This project was built with Claude Code (Claude Fable 5.1) in one session on 2026-10-12, mostly in its plan mode, from the prompts below in this order. I had hoped to spend much more time reviewing the result and making it more my own, but ran short on time; the code and the README are the agent's output steered by these prompts and by my answers to its multiple-choice questions.
+
+1. "Build the back end for a note taking service used and shared among several small teams. Users need somewhere to capture and work with their notes. Deliver a runnable REST service and README. The code will be judged for clarity, correctness, and the tradeoffs that were made. Use the most recent practical version of Java, the Spring Framework, and Spring REST support. I would like to use cassandra but the project should be as simple as possible to run in development with an embedded in-memory or simple file based database, so suggest some alternatives. Create a new public project in the jeff-romine github account. Ignore all of my other projects and don't worry about port conflicts, although it would be good to make the ports, etc. configurable."
+2. Answers to the agent's first questions: HTTP Basic with seeded users; core scope plus tag filter and archive; a storage port with an in-memory adapter and optional JSON snapshot; repo name `team-notes-service`.
+3. "Add a CLI for testing and experimentation that can be used by both developers and AI agents. Some of the challenges are going to be: 1. Handling concurrent access to notes. Can these notes be used like a shared whiteboard? 2. Searching the notes. A model for something like this may be Stack Overflow. How do I find notes from other teams that are relevant to my team? what meta data do these notes have? We probably want to add an elastic search projection." Answers: entries model plus a live event stream; ORGANIZATION visibility with an Elasticsearch projection and a Lucene development adapter, plus related notes; a picocli CLI.
+4. "Would it be possible to allow both markdown, plain text notes, and attachments like PDFs?" Answers: index PDF and text attachment contents with PDFBox; Cassandra chunk rows for attachment bytes under that profile.
+5. "Where possible use a functional core imperative shell pattern like that used in [one of my other projects] but without the explicit state machines."
+6. "In a separate project create a UI for the team-notes-service." Answers: Next.js 16, a login form holding Basic credentials in session storage, all screens, repo `team-notes-ui`.
+7. "I only have about 45 minutes left to complete this project. What should I do?" and, to the proposed cut (ship the verified service, README and repo; defer the Cassandra and Elasticsearch adapters, the CLI and the UI), "OK".
+8. "how are the notes being stored now?"
+9. "build the Cassandra adapter next. The functional core imperative shell diagram in the README.md seems inverted with the functional core wrapped around the shell", then "rollback the cassandra work".
+10. "create a demo which shows me how the REST service works", then "commit and push".
+11. "what is the github url for the project"
+12. "According to my instructions, the README.md should contain 2-3 design choices that I made and why. I would select the Cassandra choice and the Functional Core/Imperative shell choice."
+13. "It should also have a section on what I'd change, add, or stop doing if I had more time. Use the roadmap to answer that question. I'm not that sure what I would stop doing."
+14. "remove references to [that project] and just say that I use similar patterns in my personal work and they are aimed at creating systems that are clear and understandable to both Developers and AI and also focused on scalability, durable execution, reliability, and observability."
+15. "The 'A first walk' section in the readme fails due to a syntax error. Fix it."
+16. "I only have about 9 minutes left to submit this. Review the README.md again and make sure it meets all of the requirements and add a commit history to it."
+17. "also add an appendix on the prompts I submitted up to this point that generated this result. I had hoped to spend much more time reviewing and making this more my own but ran short on time."
